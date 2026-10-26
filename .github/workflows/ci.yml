@@ -1,16 +1,20 @@
 name: ci
 
 on:
-  push:
-    branches:
-      - 1.x
-  pull_request:
-    branches:
-      - 1.x
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "mocha --grep pattern to run a subset of tests (empty = full suite)"
+        required: false
+        default: ""
+
+env:
+  NPM_CONFIG_REGISTRY: https://:2026-09-08T10%3A32%3A14.519000Z@time-machines-npm.sealsecurity.io/
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -210,48 +214,53 @@ jobs:
     - name: Run tests
       shell: bash
       run: |
-        if npm -ps ls nyc | grep -q nyc; then
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          npm test -- --grep "${{ inputs.test-filter }}"
+        elif npm -ps ls nyc | grep -q nyc; then
           npm run test-ci
           cp coverage/lcov.info "coverage/${{ matrix.name }}.lcov"
         else
           npm test
         fi
 
+    - name: Report skipped tests
+      shell: bash
+      run: |
+        node -e '
+          var ah; try { ah = require("async_hooks") } catch (e) { ah = {} }
+          var skipped = 0
+          if (typeof ah.AsyncLocalStorage !== "function") {
+            skipped++
+            console.log("SKIPPED (21 tests): the \"async local storage\" suites in test/json.js, test/raw.js, test/text.js, test/urlencoded.js -- upstream describe.skip guard because async_hooks.AsyncLocalStorage does not exist on Node " + process.version + " (added in Node 12.17/13.10)")
+          }
+          if (process.versions.node.split(".")[0] === "21") {
+            skipped++
+            console.log("SKIPPED (1 test): test/body-parser.js \"should support QUERY requests\" -- upstream this.skip() because Node 21 lists QUERY in http.METHODS but does not support it (nodejs/node#51562)")
+          }
+          if (!skipped) console.log("No tests skipped on Node " + process.version)
+        '
+
     - name: Lint code
       if: steps.list_env.outputs.eslint != ''
       run: npm run lint
 
-    - name: Upload code coverage
-      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-      with:
-        name: coverage-node-${{ matrix.node-version }}
-        path: ./coverage/lcov.info
-        retention-days: 1
-
-  coverage:
-    needs: test
+  pack:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write
+    timeout-minutes: 30
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install lcov
-      shell: bash
-      run: sudo apt-get -y install lcov
-
-    - name: Collect coverage reports
-      uses: actions/download-artifact@v6
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
       with:
-        path: ./coverage
-        pattern: coverage-node-*
+        node-version: "24"
 
-    - name: Merge coverage reports
-      shell: bash
-      run: find ./coverage -name lcov.info -exec printf '-a %q\n' {} \; | xargs lcov -o ./lcov.info
+    - name: Pack npm tarball
+      run: npm pack
 
-    - name: Upload coverage report
-      uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6
+    - name: Upload npm tarball
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
-        file: ./lcov.info
+        name: npm-tarball
+        path: ./body-parser-*.tgz
+        if-no-files-found: error
